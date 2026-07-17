@@ -1,0 +1,107 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: disease_risk_db
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_secure_pwd}
+      POSTGRES_DB: ${POSTGRES_DB:-disease_risk_db}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d disease_risk_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform_network
+
+  redis:
+    image: redis:7-alpine
+    container_name: disease_risk_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - platform_network
+
+  mlflow:
+    image: python:3.10-slim
+    container_name: disease_risk_mlflow
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    working_dir: /mlflow
+    command: >
+      sh -c "pip install --no-cache-dir mlflow==2.3.0 && 
+             mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlflow.db --default-artifact-root /mlflow/artifacts"
+    networks:
+      - platform_network
+
+  mlflow-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: disease_risk_mlflow_init
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODEL_NAME=${MODEL_NAME:-disease-risk-model}
+      - MODEL_STAGE=${MODEL_STAGE:-Production}
+    command: python scripts/train_and_register.py
+    depends_on:
+      - mlflow
+    networks:
+      - platform_network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: disease_risk_app
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_ENV=${APP_ENV:-development}
+      - API_KEY=${API_KEY:-dev-secret-key-12345}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres_secure_pwd}
+      - POSTGRES_DB=${POSTGRES_DB:-disease_risk_db}
+      - POSTGRES_HOST=db
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - REDIS_PASSWORD=
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+      - MODEL_NAME=${MODEL_NAME:-disease-risk-model}
+      - MODEL_STAGE=${MODEL_STAGE:-Production}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mlflow-init:
+        condition: service_completed_successfully
+    networks:
+      - platform_network
+
+volumes:
+  postgres_data:
+  redis_data:
+  mlflow_data:
+
+networks:
+  platform_network:
+    name: disease_risk_network
